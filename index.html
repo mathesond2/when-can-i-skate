@@ -21,7 +21,6 @@
   .strip { display:flex; gap:2px; }
   .cell { flex:1; min-width:0; height:22px; padding:0; border:0; border-radius:3px; background:var(--none); cursor:pointer; }
   .cell.ok { background:var(--ok); } .cell.prime { background:var(--prime); }
-  .cell.off { opacity:.3; }
   .cell.sel { outline:2px solid var(--fg); outline-offset:1px; opacity:1; }
   .detail { margin-top:8px; padding:8px 10px; border-radius:6px; background:var(--line); font-size:13px; }
   .detail b { display:block; margin-bottom:2px; }
@@ -35,13 +34,10 @@
 <h1 id="next">Checking the forecast…</h1>
 <div class="meta"><span id="updated"></span><button id="refresh">Refresh</button></div>
 <div id="days"></div>
-<div class="legend"><em style="background:var(--prime)"></em>prime<em style="background:var(--ok)"></em>ok<em style="background:var(--none)"></em>no<em style="background:var(--ok);opacity:.3"></em>outside free time</div>
+<div class="legend"><em style="background:var(--prime)"></em>prime<em style="background:var(--ok)"></em>ok<em style="background:var(--none)"></em>no</div>
 <script>
 const CONFIG = {
   lat: 40.777, lon: -73.922,      // Astoria Park skate park, Queens
-  weekday: { start: "17:30", end: "21:00" },   // after work + commute
-  weekend: { start: "08:00", end: "21:00" },
-  blocked: [],                    // e.g. { days: [1,2,3,4,5], start: "18:30", end: "20:00" }  (0 = Sunday)
   minTempF: 45, maxTempF: 95,
   maxWindMph: 20,
   rainMm: 0.2,                    // an hour with at least this much counts as rain
@@ -58,7 +54,6 @@ const URL_ = "https://api.open-meteo.com/v1/forecast?latitude=" + CONFIG.lat + "
 
 // All times are "wall minutes": the forecast location's local clock, counted as if it were UTC.
 const wall = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10), +s.slice(11, 13) || 0, +s.slice(14, 16) || 0) / 60000;
-const hm = s => +s.slice(0, 2) * 60 + +s.slice(3, 5);
 const DAY = 1440, DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const dow = m => new Date(m * 60000).getUTCDay();
 function clock(m, withAmPm = true) {
@@ -84,17 +79,6 @@ function hourFacts(h, i, cfg) {
     wind: h.wind_speed_10m[i], gust: h.wind_gusts_10m[i], mm: at(h.precipitation, i), pop: at(h.precipitation_probability || [], i) };
 }
 
-// Free minutes for a day starting at `d`: the weekday/weekend range minus blocked ranges, clipped to daylight.
-function freeRanges(d, rise, set, cfg) {
-  const wd = dow(d), win = wd === 0 || wd === 6 ? cfg.weekend : cfg.weekday;
-  let ranges = [[Math.max(d + hm(win.start), rise), Math.min(d + hm(win.end), set)]];
-  for (const b of cfg.blocked) if (b.days.includes(wd)) {
-    const bs = d + hm(b.start), be = d + hm(b.end);
-    ranges = ranges.flatMap(([s, e]) => [[s, Math.min(e, bs)], [Math.max(s, be), e]]);
-  }
-  return ranges.filter(([s, e]) => e > s);
-}
-
 function analyze(data, cfg, now) {
   const h = data.hourly, times = h.time.map(wall), today = Math.floor(now / DAY) * DAY;
   const facts = times.map((_, i) => hourFacts(h, i, cfg));
@@ -102,27 +86,24 @@ function analyze(data, cfg, now) {
   data.daily.time.forEach((ds, k) => {
     const d = wall(ds);
     if (d < today) return;
-    const rise = wall(data.daily.sunrise[k]), set = wall(data.daily.sunset[k]), free = freeRanges(d, rise, set, cfg);
+    const rise = wall(data.daily.sunrise[k]), set = wall(data.daily.sunset[k]);
     const cells = [], windows = [], reasons = {};
     for (let i = 0; i < times.length; i++) {
       const s = times[i], e = s + 60;
       if (s < d || s >= d + DAY) continue;
-      const daylight = e > rise && s < set;
+      const a = Math.max(s, rise), b = Math.min(e, set);
       if (e > rise - (rise % 60) && s < d + STRIP_END)
-        cells.push({ s, f: facts[i], cls: !daylight || facts[i].fail ? "" : facts[i].prime ? "prime" : "ok",
-          off: !free.some(([fs, fe]) => e > fs && s < fe), why: daylight ? facts[i].fail : "dark" });
-      for (const [fs, fe] of free) {
-        const a = Math.max(s, fs), b = Math.min(e, fe);
-        if (b <= a) continue;
-        if (facts[i].fail) { reasons[facts[i].fail] = (reasons[facts[i].fail] || 0) + b - a; continue; }
-        const last = windows[windows.length - 1];
-        if (last && last[1] === a) last[1] = b; else windows.push([a, b]);
-      }
+        cells.push({ s, f: facts[i], cls: b <= a || facts[i].fail ? "" : facts[i].prime ? "prime" : "ok",
+          why: b > a ? facts[i].fail : "dark" });
+      if (b <= a) continue;
+      if (facts[i].fail) { reasons[facts[i].fail] = (reasons[facts[i].fail] || 0) + b - a; continue; }
+      const last = windows[windows.length - 1];
+      if (last && last[1] === a) last[1] = b; else windows.push([a, b]);
     }
     const kept = windows.filter(([a, b]) => b - a >= cfg.minWindowMinutes);
     const main = Object.entries(reasons).sort((x, y) => y[1] - x[1])[0];
     days.push({ d, cells, windows: kept, minutes: kept.reduce((t, [a, b]) => t + b - a, 0),
-      reason: free.length ? (main ? main[0] : "no daylight") : "no free time" });
+      reason: main ? main[0] : "no daylight" });
   });
   return days;
 }
@@ -144,7 +125,7 @@ function detail(c) {
   const f = c.f, rain = f.pop == null ? f.mm.toFixed(1) + " mm" : f.pop + "% chance (" + f.mm.toFixed(1) + " mm)";
   const verdict = c.why ? VERDICT[c.why] : (c.cls === "prime" ? "Prime" : "OK") + " to skate";
   const dried = f.since === Infinity ? "no recent rain" : f.since > 24 ? "dry for over a day" :f.since === 0 ? "rained the hour before" : "last rain " + f.since + "h before";
-  return `<div class="detail"><b>${clock(c.s)} to ${clock(c.s + 60)} · ${verdict}${c.off ? " · outside free time" : ""}</b>` +
+  return `<div class="detail"><b>${clock(c.s)} to ${clock(c.s + 60)} · ${verdict}</b>` +
     `${Math.round(f.t)}°F · wind ${Math.round(f.wind)} mph, gusts ${Math.round(f.gust)} · rain ${rain} · ${f.sunny ? "sunny" : "cloudy"} · ${dried}</div>`;
 }
 
@@ -153,7 +134,7 @@ function renderDays() {
     const best = day.windows.slice().sort((x, y) => (y[1] - y[0]) - (x[1] - x[0]))[0];
     const label = n === 0 ? "Today" : DOW[dow(day.d)];
     const text = best ? range(best) + " · " + dur(day.minutes) + " total" : "none · " + day.reason;
-    const cells = day.cells.map(c => `<button class="cell ${c.cls}${c.off ? " off" : ""}${c.s === selected ? " sel" : ""}" data-s="${c.s}" aria-label="${clock(c.s)} details"></button>`).join("");
+    const cells = day.cells.map(c => `<button class="cell ${c.cls}${c.s === selected ? " sel" : ""}" data-s="${c.s}" aria-label="${clock(c.s)} details"></button>`).join("");
     const ticks = day.cells.map(c => `<i>${(c.s / 60) % 3 === 0 ? clock(c.s, false) : ""}</i>`).join("");
     const open = day.cells.find(c => c.s === selected);
     return `<div class="day"><div class="head"><b>${label}</b><span>${text}</span></div><div class="strip">${cells}</div><div class="ticks">${ticks}</div>${open ? detail(open) : ""}</div>`;
