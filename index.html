@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>When Can I Skate?</title>
+<style>
+  :root { --bg:#fafaf7; --fg:#1d1d1b; --muted:#77776f; --none:#dcdcd6; --ok:#a7e3a0; --prime:#2e9e44; --line:#e8e8e2; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141413; --fg:#ececea; --muted:#8d8d86; --none:#2f2f2c; --ok:#3d6b3c; --prime:#4fc463; --line:#262624; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px 16px 32px; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui, -apple-system, sans-serif; max-width:640px; margin-inline:auto; }
+  h1 { font-size:22px; line-height:1.25; margin:0 0 4px; }
+  .meta { color:var(--muted); font-size:13px; margin-bottom:18px; display:flex; gap:10px; align-items:center; }
+  button { font:inherit; font-size:13px; padding:3px 10px; border-radius:6px; border:1px solid var(--line); background:transparent; color:var(--fg); cursor:pointer; }
+  .day { padding:10px 0; border-top:1px solid var(--line); }
+  .head { display:flex; justify-content:space-between; gap:8px; font-size:14px; margin-bottom:6px; }
+  .head b { min-width:56px; }
+  .head span { color:var(--muted); text-align:right; }
+  .strip { display:flex; gap:2px; }
+  .cell { flex:1; height:22px; border-radius:3px; background:var(--none); }
+  .cell.ok { background:var(--ok); } .cell.prime { background:var(--prime); }
+  .cell.off { opacity:.3; }
+  .ticks { display:flex; gap:2px; font-size:10px; color:var(--muted); margin-top:2px; }
+  .ticks i { flex:1; font-style:normal; }
+  .legend { color:var(--muted); font-size:12px; margin-top:14px; }
+  .legend em { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 4px 0 10px; vertical-align:-1px; }
+</style>
+</head>
+<body>
+<h1 id="next">Checking the forecast…</h1>
+<div class="meta"><span id="updated"></span><button id="refresh">Refresh</button></div>
+<div id="days"></div>
+<div class="legend"><em style="background:var(--prime)"></em>prime<em style="background:var(--ok)"></em>ok<em style="background:var(--none)"></em>no<em style="background:var(--ok);opacity:.3"></em>outside free time</div>
+<script>
+const CONFIG = {
+  lat: 40.77, lon: -73.92,        // set to home
+  weekday: { start: "17:30", end: "21:00" },   // after work + commute
+  weekend: { start: "08:00", end: "21:00" },
+  blocked: [],                    // e.g. { days: [1,2,3,4,5], start: "18:30", end: "20:00" }  (0 = Sunday)
+  minTempF: 45, maxTempF: 95,
+  maxWindMph: 20,
+  rainMm: 0.2,                    // an hour with at least this much counts as rain
+  dryHoursSunny: 3,               // wait after rain when it is sunny
+  dryHoursCloudy: 6,              // wait after rain otherwise
+  sunnyRadiation: 300,            // W/m2 that counts as sunny
+  minWindowMinutes: 30
+};
+const CACHE_KEY = "skate-forecast", CACHE_MS = 20 * 60 * 1000, STRIP_END = 21 * 60;
+const URL_ = "https://api.open-meteo.com/v1/forecast?latitude=" + CONFIG.lat + "&longitude=" + CONFIG.lon +
+  "&hourly=temperature_2m,precipitation,wind_speed_10m,wind_gusts_10m,shortwave_radiation,weather_code" +
+  "&daily=sunrise,sunset&past_days=1&forecast_days=7&timezone=auto" +
+  "&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=mm";
+
+// All times are "wall minutes": the forecast location's local clock, counted as if it were UTC.
+const wall = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10), +s.slice(11, 13) || 0, +s.slice(14, 16) || 0) / 60000;
+const hm = s => +s.slice(0, 2) * 60 + +s.slice(3, 5);
+const DAY = 1440, DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const dow = m => new Date(m * 60000).getUTCDay();
+function clock(m, withAmPm = true) {
+  const d = new Date(m * 60000), h = d.getUTCHours(), mi = d.getUTCMinutes();
+  return (h % 12 || 12) + (mi ? ":" + String(mi).padStart(2, "0") : "") + (withAmPm ? (h < 12 ? " AM" : " PM") : "");
+}
+
+// Open-Meteo precipitation and radiation are sums/means over the hour *ending* at the timestamp,
+// so the hour starting at time i is described by the value at i + 1.
+function hourFacts(h, i, cfg) {
+  const at = (arr, j) => arr[j + 1] ?? arr[j];
+  const rained = j => at(h.precipitation, j) >= cfg.rainMm;
+  let since = Infinity;
+  for (let j = i - 1; j >= 0; j--) if (rained(j)) { since = i - j - 1; break; }
+  const wind = Math.max(h.wind_speed_10m[i], 0.7 * h.wind_gusts_10m[i]);
+  const sunny = at(h.shortwave_radiation, i) >= cfg.sunnyRadiation;
+  const t = h.temperature_2m[i];
+  const storm = [95, 96, 99].includes(h.weather_code[i]) || (i > 0 && [95, 96, 99].includes(h.weather_code[i - 1]));
+  const fail =
+    rained(i) || since < (sunny ? cfg.dryHoursSunny : cfg.dryHoursCloudy) ? "wet" :
+    storm ? "storms" : t < cfg.minTempF ? "cold" : t > cfg.maxTempF ? "hot" : wind > cfg.maxWindMph ? "wind" : null;
+  return { fail, prime: !fail && t >= 55 && t <= 82 && h.wind_speed_10m[i] < 10 };
+}
+
+// Free minutes for a day starting at `d`: the weekday/weekend range minus blocked ranges, clipped to daylight.
+function freeRanges(d, rise, set, cfg) {
+  const wd = dow(d), win = wd === 0 || wd === 6 ? cfg.weekend : cfg.weekday;
+  let ranges = [[Math.max(d + hm(win.start), rise), Math.min(d + hm(win.end), set)]];
+  for (const b of cfg.blocked) if (b.days.includes(wd)) {
+    const bs = d + hm(b.start), be = d + hm(b.end);
+    ranges = ranges.flatMap(([s, e]) => [[s, Math.min(e, bs)], [Math.max(s, be), e]]);
+  }
+  return ranges.filter(([s, e]) => e > s);
+}
+
+function analyze(data, cfg, now) {
+  const h = data.hourly, times = h.time.map(wall), today = Math.floor(now / DAY) * DAY;
+  const facts = times.map((_, i) => hourFacts(h, i, cfg));
+  const days = [];
+  data.daily.time.forEach((ds, k) => {
+    const d = wall(ds);
+    if (d < today) return;
+    const rise = wall(data.daily.sunrise[k]), set = wall(data.daily.sunset[k]), free = freeRanges(d, rise, set, cfg);
+    const cells = [], windows = [], reasons = {};
+    for (let i = 0; i < times.length; i++) {
+      const s = times[i], e = s + 60;
+      if (s < d || s >= d + DAY) continue;
+      const daylight = e > rise && s < set;
+      if (e > rise - (rise % 60) && s < d + STRIP_END)
+        cells.push({ s, cls: !daylight || facts[i].fail ? "" : facts[i].prime ? "prime" : "ok",
+          off: !free.some(([fs, fe]) => e > fs && s < fe), why: daylight ? facts[i].fail : "dark" });
+      for (const [fs, fe] of free) {
+        const a = Math.max(s, fs), b = Math.min(e, fe);
+        if (b <= a) continue;
+        if (facts[i].fail) { reasons[facts[i].fail] = (reasons[facts[i].fail] || 0) + b - a; continue; }
+        const last = windows[windows.length - 1];
+        if (last && last[1] === a) last[1] = b; else windows.push([a, b]);
+      }
+    }
+    const kept = windows.filter(([a, b]) => b - a >= cfg.minWindowMinutes);
+    const main = Object.entries(reasons).sort((x, y) => y[1] - x[1])[0];
+    days.push({ d, cells, windows: kept, minutes: kept.reduce((t, [a, b]) => t + b - a, 0),
+      reason: free.length ? (main ? main[0] : "no daylight") : "no free time" });
+  });
+  return days;
+}
+
+function dayName(d, now, start) {
+  const today = Math.floor(now / DAY) * DAY;
+  if (d === today) return start !== undefined && start - d >= 17 * 60 ? "Tonight" : "Today";
+  if (d === today + DAY) return "Tomorrow";
+  return DOW[dow(d)];
+}
+const range = ([a, b]) => clock(a, (a % DAY < 720) !== (b % DAY < 720)) + " to " + clock(b);
+
+function render(data, fetchedAt, note) {
+  const now = Date.now() / 60000 + data.utc_offset_seconds / 60, days = analyze(data, CONFIG, now);
+  let next = null;
+  for (const day of days) for (const w of day.windows) if (!next && w[1] - Math.max(w[0], now) >= CONFIG.minWindowMinutes) next = { d: day.d, w: [Math.max(w[0], now), w[1]] };
+  document.getElementById("next").textContent = next
+    ? "Next window: " + dayName(next.d, now, next.w[0]) + " " + range(next.w) + "."
+    : "No skate window in the next 7 days.";
+  document.getElementById("days").innerHTML = days.map((day, n) => {
+    const best = day.windows.slice().sort((x, y) => (y[1] - y[0]) - (x[1] - x[0]))[0];
+    const label = n === 0 ? "Today" : DOW[dow(day.d)];
+    const text = best ? range(best) + " · " + day.minutes + " min" : "none · " + day.reason;
+    const cells = day.cells.map(c => `<div class="cell ${c.cls}${c.off ? " off" : ""}" title="${clock(c.s)}${c.why ? " · " + c.why : ""}"></div>`).join("");
+    const ticks = day.cells.map(c => `<i>${(c.s / 60) % 3 === 0 ? clock(c.s, false) : ""}</i>`).join("");
+    return `<div class="day"><div class="head"><b>${label}</b><span>${text}</span></div><div class="strip">${cells}</div><div class="ticks">${ticks}</div></div>`;
+  }).join("");
+  const mins = Math.round((Date.now() - fetchedAt) / 60000);
+  document.getElementById("updated").textContent = "updated " + (mins < 1 ? "just now" : mins + " min ago") + (note ? " · " + note : "");
+}
+
+async function load(force) {
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem(CACHE_KEY)); } catch {}
+  if (cached && !force && Date.now() - cached.at < CACHE_MS) return render(cached.data, cached.at);
+  try {
+    const res = await fetch(URL_);
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json(), at = Date.now();
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ at, data })); } catch {}
+    render(data, at);
+  } catch (err) {
+    if (cached) render(cached.data, cached.at, "offline, showing cached forecast");
+    else document.getElementById("next").textContent = "Couldn't load the forecast (" + err.message + ").";
+  }
+}
+
+document.getElementById("refresh").onclick = () => load(true);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") load(); });
+setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
+load();
+</script>
+</body>
+</html>
