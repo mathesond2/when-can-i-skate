@@ -19,9 +19,12 @@
   .head b { min-width:56px; }
   .head span { color:var(--muted); text-align:right; }
   .strip { display:flex; gap:2px; }
-  .cell { flex:1; height:22px; border-radius:3px; background:var(--none); }
+  .cell { flex:1; min-width:0; height:22px; padding:0; border:0; border-radius:3px; background:var(--none); cursor:pointer; }
   .cell.ok { background:var(--ok); } .cell.prime { background:var(--prime); }
   .cell.off { opacity:.3; }
+  .cell.sel { outline:2px solid var(--fg); outline-offset:1px; opacity:1; }
+  .detail { margin-top:8px; padding:8px 10px; border-radius:6px; background:var(--line); font-size:13px; }
+  .detail b { display:block; margin-bottom:2px; }
   .ticks { display:flex; gap:2px; font-size:10px; color:var(--muted); margin-top:2px; }
   .ticks i { flex:1; font-style:normal; }
   .legend { color:var(--muted); font-size:12px; margin-top:14px; }
@@ -49,7 +52,7 @@ const CONFIG = {
 };
 const CACHE_KEY = "skate-forecast", CACHE_MS = 20 * 60 * 1000, STRIP_END = 21 * 60;
 const URL_ = "https://api.open-meteo.com/v1/forecast?latitude=" + CONFIG.lat + "&longitude=" + CONFIG.lon +
-  "&hourly=temperature_2m,precipitation,wind_speed_10m,wind_gusts_10m,shortwave_radiation,weather_code" +
+  "&hourly=temperature_2m,precipitation,precipitation_probability,wind_speed_10m,wind_gusts_10m,shortwave_radiation,weather_code" +
   "&daily=sunrise,sunset&past_days=1&forecast_days=7&timezone=auto" +
   "&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=mm";
 
@@ -77,7 +80,8 @@ function hourFacts(h, i, cfg) {
   const fail =
     rained(i) || since < (sunny ? cfg.dryHoursSunny : cfg.dryHoursCloudy) ? "wet" :
     storm ? "storms" : t < cfg.minTempF ? "cold" : t > cfg.maxTempF ? "hot" : wind > cfg.maxWindMph ? "wind" : null;
-  return { fail, prime: !fail && t >= 55 && t <= 82 && h.wind_speed_10m[i] < 10 };
+  return { fail, prime: !fail && t >= 55 && t <= 82 && h.wind_speed_10m[i] < 10, t, since, sunny,
+    wind: h.wind_speed_10m[i], gust: h.wind_gusts_10m[i], mm: at(h.precipitation, i), pop: at(h.precipitation_probability || [], i) };
 }
 
 // Free minutes for a day starting at `d`: the weekday/weekend range minus blocked ranges, clipped to daylight.
@@ -105,7 +109,7 @@ function analyze(data, cfg, now) {
       if (s < d || s >= d + DAY) continue;
       const daylight = e > rise && s < set;
       if (e > rise - (rise % 60) && s < d + STRIP_END)
-        cells.push({ s, cls: !daylight || facts[i].fail ? "" : facts[i].prime ? "prime" : "ok",
+        cells.push({ s, f: facts[i], cls: !daylight || facts[i].fail ? "" : facts[i].prime ? "prime" : "ok",
           off: !free.some(([fs, fe]) => e > fs && s < fe), why: daylight ? facts[i].fail : "dark" });
       for (const [fs, fe] of free) {
         const a = Math.max(s, fs), b = Math.min(e, fe);
@@ -130,22 +134,41 @@ function dayName(d, now, start) {
   return DOW[dow(d)];
 }
 const range = ([a, b]) => clock(a, (a % DAY < 720) !== (b % DAY < 720)) + " to " + clock(b);
+const dur = m => (m >= 60 ? Math.floor(m / 60) + "h" : "") + (m % 60 ? (m >= 60 ? " " : "") + (m % 60) + "m" : "");
+
+const VERDICT = { dark: "No daylight", wet: "Surface likely wet", storms: "Thunderstorms nearby",
+  cold: "Too cold", hot: "Too hot", wind: "Too windy" };
+let days = [], selected = null;
+
+function detail(c) {
+  const f = c.f, rain = f.pop == null ? f.mm.toFixed(1) + " mm" : f.pop + "% chance (" + f.mm.toFixed(1) + " mm)";
+  const verdict = c.why ? VERDICT[c.why] : (c.cls === "prime" ? "Prime" : "OK") + " to skate";
+  const dried = f.since === Infinity ? "no recent rain" : f.since > 24 ? "dry for over a day" :f.since === 0 ? "rained the hour before" : "last rain " + f.since + "h before";
+  return `<div class="detail"><b>${clock(c.s)} to ${clock(c.s + 60)} · ${verdict}${c.off ? " · outside free time" : ""}</b>` +
+    `${Math.round(f.t)}°F · wind ${Math.round(f.wind)} mph, gusts ${Math.round(f.gust)} · rain ${rain} · ${f.sunny ? "sunny" : "cloudy"} · ${dried}</div>`;
+}
+
+function renderDays() {
+  document.getElementById("days").innerHTML = days.map((day, n) => {
+    const best = day.windows.slice().sort((x, y) => (y[1] - y[0]) - (x[1] - x[0]))[0];
+    const label = n === 0 ? "Today" : DOW[dow(day.d)];
+    const text = best ? range(best) + " · " + dur(day.minutes) + " total" : "none · " + day.reason;
+    const cells = day.cells.map(c => `<button class="cell ${c.cls}${c.off ? " off" : ""}${c.s === selected ? " sel" : ""}" data-s="${c.s}" aria-label="${clock(c.s)} details"></button>`).join("");
+    const ticks = day.cells.map(c => `<i>${(c.s / 60) % 3 === 0 ? clock(c.s, false) : ""}</i>`).join("");
+    const open = day.cells.find(c => c.s === selected);
+    return `<div class="day"><div class="head"><b>${label}</b><span>${text}</span></div><div class="strip">${cells}</div><div class="ticks">${ticks}</div>${open ? detail(open) : ""}</div>`;
+  }).join("");
+}
 
 function render(data, fetchedAt, note) {
-  const now = Date.now() / 60000 + data.utc_offset_seconds / 60, days = analyze(data, CONFIG, now);
+  const now = Date.now() / 60000 + data.utc_offset_seconds / 60;
+  days = analyze(data, CONFIG, now);
   let next = null;
   for (const day of days) for (const w of day.windows) if (!next && w[1] - Math.max(w[0], now) >= CONFIG.minWindowMinutes) next = { d: day.d, w: [Math.max(w[0], now), w[1]] };
   document.getElementById("next").textContent = next
     ? "Next window: " + dayName(next.d, now, next.w[0]) + " " + range(next.w) + "."
     : "No skate window in the next 7 days.";
-  document.getElementById("days").innerHTML = days.map((day, n) => {
-    const best = day.windows.slice().sort((x, y) => (y[1] - y[0]) - (x[1] - x[0]))[0];
-    const label = n === 0 ? "Today" : DOW[dow(day.d)];
-    const text = best ? range(best) + " · " + day.minutes + " min" : "none · " + day.reason;
-    const cells = day.cells.map(c => `<div class="cell ${c.cls}${c.off ? " off" : ""}" title="${clock(c.s)}${c.why ? " · " + c.why : ""}"></div>`).join("");
-    const ticks = day.cells.map(c => `<i>${(c.s / 60) % 3 === 0 ? clock(c.s, false) : ""}</i>`).join("");
-    return `<div class="day"><div class="head"><b>${label}</b><span>${text}</span></div><div class="strip">${cells}</div><div class="ticks">${ticks}</div></div>`;
-  }).join("");
+  renderDays();
   const mins = Math.round((Date.now() - fetchedAt) / 60000);
   document.getElementById("updated").textContent = "updated " + (mins < 1 ? "just now" : mins + " min ago") + (note ? " · " + note : "");
 }
@@ -167,6 +190,12 @@ async function load(force) {
 }
 
 document.getElementById("refresh").onclick = () => load(true);
+document.getElementById("days").onclick = e => {
+  const s = e.target.closest(".cell")?.dataset.s;
+  if (s === undefined) return;
+  selected = +s === selected ? null : +s;
+  renderDays();
+};
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") load(); });
 setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000);
 load();

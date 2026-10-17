@@ -16,7 +16,7 @@ Open `index.html` in a browser, or visit the GitHub Pages site. It is set to Ast
 4. **Comfortable:** temperature between `minTempF` and `maxTempF`, and `max(wind, 0.7 × gust)` ≤ `maxWindMph`.
 5. **No thunder:** weather code is not 95, 96 or 99 in this hour or the one before.
 
-Green hours that are 55–82 °F with wind under 10 mph are **prime** (dark green), the rest are **ok** (light green). Hours outside your free time are dimmed, so you can see what you are missing.
+Green hours that are 55–82 °F with wind under 10 mph are **prime** (dark green), the rest are **ok** (light green). Hours outside your free time are dimmed, so you can see what you are missing. Tap any hour to see its temperature, wind, chance of rain, and why it is or isn't skateable.
 
 Consecutive green hours become windows, clipped to your free time; windows shorter than `minWindowMinutes` are dropped.
 
