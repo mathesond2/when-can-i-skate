@@ -6,7 +6,7 @@ It pulls the next 7 days of hourly weather from [Open-Meteo](https://open-meteo.
 
 ## Use it
 
-Open `index.html` in a browser, or visit the GitHub Pages site. To make it yours, edit the `CONFIG` block at the top of the `<script>` (home lat/lon, free hours, temperature and wind limits) and reload.
+Open `index.html` in a browser, or visit the GitHub Pages site. It is set to Astoria Park, Queens. To change it, edit the `CONFIG` block at the top of the `<script>` (home lat/lon, free hours, temperature and wind limits) and reload.
 
 ## How an hour turns green
 
